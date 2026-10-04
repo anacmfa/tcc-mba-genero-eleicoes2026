@@ -1,0 +1,10 @@
+id_candidatura,candidata,uf,partido,espectro_politico,total_propostas,propostas_genero,densidade_genero_pct,status_analise
+1,Rosi Aires,RR,PSOL,Esquerda,77,10,13.0,Auditado
+2,Professora Maria do Carmo,AM,PL,Direita,8,1,12.5,Outlier_Narrativo
+3,Well Macedo,PA,PSTU,Esquerda,16,2,12.5,Auditado
+4,Hana Ghassan,PA,MDB,Centro,597,73,12.2,Auditado
+5,Gal Leite,PA,UP,Esquerda,41,3,7.3,Auditado
+6,Mailza Assis,AC,PP,Centro Direita,358,17,4.7,Auditado
+7,Professora Dorinha,TO,UNIÃO,Centro Direita,70,1,1.4,Auditado
+8,Araceli Lemos,PA,PSOL,Esquerda,5,0,0.0,Outlier_Narrativo
+TOTAL,Consolidado Regiao Norte,NORTE,MULTI,MULTI,1172,107,9.1,Concluido
