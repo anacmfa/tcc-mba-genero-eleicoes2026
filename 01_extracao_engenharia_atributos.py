@@ -1,112 +1,78 @@
 """
-Etapa 2: Adaptação de Domínio (MLM) via BERTimbau,
-Ajuste Fino Supervisionado (HITL) e Cálculo das Métricas de Classificação
+Etapa 1: Ingestão de Documentos em PDF, Segmentação Heurística
+e Engenharia de Atributos (Geração da Variável 'context')
 """
 
-import numpy as np
+import os
+import re
+import fitz  # PyMuPDF
 import pandas as pd
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-import torch
-from transformers import (
-    AutoModelForMaskedLM,
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    DataCollatorForLanguageModeling,
-    Trainer,
-    TrainingArguments,
-)
+import spacy
 
-# ------------------------------------------------------------------------------
-# 1. FUNÇÃO DE AVALIAÇÃO DE MÉTRICAS (Precisão, Revocação, Acurácia, Macro F1)
-# ------------------------------------------------------------------------------
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    preds = np.argmax(logits, axis=-1)
-    acc = accuracy_score(labels, preds)
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        labels, preds, average="macro", zero_division=0
-    )
-    return {
-        "acuracia": acc,
-        "precisao": precision,
-        "recall": recall,
-        "macro_f1": f1,
-    }
+# Carregamento do modelo de língua portuguesa para normalização
+nlp = spacy.load("pt_core_news_lg")
 
 
-# ------------------------------------------------------------------------------
-# 2. FASE 1: ADAPTAÇÃO DE DOMÍNIO (MLM) NO CORPUS ELEITORAL
-# ------------------------------------------------------------------------------
-def treinar_adaptacao_dominio(dataset_nacional_tokenizado):
-    """Realiza a continuidade do pré-treinamento com modelagem de linguagem mascarada."""
-    modelo_base = "neuralmind/bert-base-portuguese-cased"
-    tokenizer = AutoTokenizer.from_pretrained(modelo_base)
-    model_mlm = AutoModelForMaskedLM.from_pretrained(modelo_base)
-
-    # Mascaramento estocástico de 15% dos tokens
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer, mlm=True, mlm_probability=0.15
-    )
-
-    args_mlm = TrainingArguments(
-        output_dir="./bert_adaptado",
-        num_train_epochs=3,
-        per_device_train_batch_size=16,
-        fp16=torch.cuda.is_available(),
-        save_strategy="no",
-        logging_steps=50,
-    )
-
-    trainer_mlm = Trainer(
-        model=model_mlm,
-        args=args_mlm,
-        data_collator=data_collator,
-        train_dataset=dataset_nacional_tokenizado,
-    )
-
-    trainer_mlm.train()
-    trainer_mlm.save_model("./bert2_dominio_eleitoral")
-    tokenizer.save_pretrained("./bert2_dominio_eleitoral")
-    print("Adaptação de domínio concluída e pesos guardados em ./bert2_dominio_eleitoral")
+def normalizar_texto(texto: str) -> str:
+    """Aplica lematização e limpeza inicial com o spaCy."""
+    doc = nlp(texto)
+    lemas = [token.lemma_ for token in doc if not token.is_space]
+    return " ".join(lemas)
 
 
-# ------------------------------------------------------------------------------
-# 3. FASE 2: AJUSTE FINO SUPERVISIONADO (PADRÃO-OURO HITL)
-# ------------------------------------------------------------------------------
-def treinar_classificador_hitl(dataset_treino_hitl, dataset_val_hitl):
-    """Executa o ajuste fino supervisionado do BERT2 para classificação binária."""
-    caminho_modelo_adaptado = "./bert2_dominio_eleitoral"
+def extrair_propostas_pdf(caminho_pdf: str, metadata: dict) -> pd.DataFrame:
+    """Extrai texto bruto de ficheiros PDF eleitorais e segmenta em propostas atómicas."""
+    doc = fitz.open(caminho_pdf)
+    texto_completo = " ".join([pagina.get_text() for pagina in doc])
 
-    model_clf = AutoModelForSequenceClassification.from_pretrained(
-        caminho_modelo_adaptado, num_labels=2
-    )
+    # Segmentação heurística por marcadores enumerativos e alíneas
+    padrao_propostas = r"(?:\n\d+\.|\n•|\n-)\s*(.*?)(?=(?:\n\d+\.|\n•|\n-|\Z))"
+    itens = re.findall(padrao_propostas, texto_completo, re.DOTALL)
 
-    args_clf = TrainingArguments(
-        output_dir="./bert2_classificador_genero",
-        num_train_epochs=5,
-        learning_rate=2e-5,
-        weight_decay=0.01,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=16,
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        load_best_model_at_end=True,
-        metric_for_best_model="macro_f1",
-        fp16=torch.cuda.is_available(),
-    )
+    registros = []
 
-    trainer_clf = Trainer(
-        model=model_clf,
-        args=args_clf,
-        train_dataset=dataset_treino_hitl,  # 80% do conjunto anotado manualmente
-        eval_dataset=dataset_val_hitl,      # 20% reservado para validação
-        compute_metrics=compute_metrics,
-    )
+    # Rotina principal: listas estruturadas
+    if len(itens) > 0:
+        for idx, item in enumerate(itens):
+            item_limpo = re.sub(r"\s+", " ", item).strip()
 
-    trainer_clf.train()
-    trainer_clf.save_model("./bert2_classificador_genero_final")
-    print("Treino do classificador concluído. Modelo pronto para inferência.")
+            # Filtro sintático para expurgar cabeçalhos, rodapés e ruídos
+            if len(item_limpo) > 25:
+                partes = item_limpo.split(",", 1)
+                titulo = partes[0].strip()
+                descricao = partes[1].strip() if len(partes) > 1 else partes[0].strip()
+
+                # Engenharia de atributos: fusão com token separador [SEP]
+                context_feature = f"{titulo} [SEP] {descricao}"
+
+                registros.append(
+                    {
+                        "id_proposta": f"{metadata['uf']}_{idx+1}",
+                        "titulo_proposta": titulo,
+                        "descricao_proposta": descricao,
+                        "context": context_feature,
+                        **metadata,
+                    }
+                )
+    else:
+        # Rotina de contingência (fallback narrativo): quebra por parágrafos
+        paragrafos = texto_completo.split("\n\n")
+        for idx, p in enumerate(paragrafos):
+            p_limpo = re.sub(r"\s+", " ", p).strip()
+            if len(p_limpo) > 25:
+                context_feature = f"{p_limpo} [SEP] {p_limpo}"
+                registros.append(
+                    {
+                        "id_proposta": f"{metadata['uf']}_{idx+1}",
+                        "titulo_proposta": p_limpo[:60],
+                        "descricao_proposta": p_limpo,
+                        "context": context_feature,
+                        **metadata,
+                    }
+                )
+
+    return pd.DataFrame(registros)
 
 
 if __name__ == "__main__":
-    print("Pipeline de modelagem BERT2 pronto para execução.")
+    print("Módulo de extração e engenharia de atributos carregado com sucesso.")
